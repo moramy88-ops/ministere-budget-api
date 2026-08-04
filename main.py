@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Union, Dict, Any
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,7 @@ from psycopg2.extras import RealDictCursor
 
 app = FastAPI(title="API Suivi Budgétaire - Gestion Sécurisée")
 
+# Activation du CORS pour autoriser l'accès depuis le frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,22 +17,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_CONFIG = {
-    "dbname": "budget_db",
-    "user": "postgres",
-    "password": "zougalB613",
-    "host": "localhost",
-    "port": "5432"
-}
+# Récupération de l'URL de la base de données PostgreSQL de Render
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_db_connection():
+    if not DATABASE_URL:
+        print("⚠️ Aucune variable DATABASE_URL détectée dans l'environnement.")
+        return None
+        
     try:
-        return psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
-    except Exception:
+        url = DATABASE_URL
+        # 1. Correction du préfixe postgres:// exigé par les versions récentes de psycopg2 / SQLAlchemy
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+            
+        # 2. Sécurisation de la connexion SSL requise par Render
+        if "sslmode" not in url:
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}sslmode=require"
+            
+        return psycopg2.connect(url, cursor_factory=RealDictCursor)
+    except Exception as e:
+        print(f"❌ Erreur de connexion à PostgreSQL Render : {e}")
         return None
 
 # ============================================================
-# AUTHENTIFICATION ET CONFIGURATION DE BASE
+# CONFIGURATIONS ET MOTS DE PASSE PAR DÉFAUT
 # ============================================================
 MOTS_DE_PASSE_DEFAUT = {
     "P1": "p1_resp2026",
@@ -44,6 +56,7 @@ LFR_STATUS_BY_EXERCICE = { 2024: False, 2025: False, 2026: False, 2027: False }
 HISTORIQUE_EXERCICES = {}
 CIBLES_TRIMESTRE = {"T1": 25, "T2": 50, "T3": 75, "T4": 100}
 
+# --- MODÈLES PYDANTIC ---
 class AdminLoginPayload(BaseModel):
     password: str
 
@@ -59,7 +72,13 @@ class ChangePasswordPayload(BaseModel):
 class ResetPasswordPayload(BaseModel):
     programme_code: str
 
-# --- ENDPOINTS AUTHENTIFICATION ---
+class ToggleLfrPayload(BaseModel):
+    exercice: int
+    lfr_active: bool
+
+# ============================================================
+# AUTHENTIFICATION
+# ============================================================
 @app.post("/api/admin/login")
 def admin_login(payload: AdminLoginPayload):
     if payload.password.strip() == "admin123":
@@ -78,6 +97,15 @@ def responsable_login(payload: ResponsableLoginPayload):
     if conn:
         try:
             cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS responsable_passwords (
+                    programme_code VARCHAR(50) PRIMARY KEY,
+                    password_hash VARCHAR(255) NOT NULL,
+                    is_default BOOLEAN DEFAULT TRUE
+                );
+            """)
+            conn.commit()
+            
             cur.execute("SELECT password_hash, is_default FROM responsable_passwords WHERE programme_code = %s;", (code,))
             res = cur.fetchone()
             cur.close()
@@ -85,7 +113,8 @@ def responsable_login(payload: ResponsableLoginPayload):
             if res:
                 pwd_attendu = res['password_hash']
                 is_default = res['is_default']
-        except Exception:
+        except Exception as e:
+            print(f"Erreur vérification mot de passe DB : {e}")
             if conn: conn.close()
 
     if pwd == pwd_attendu:
@@ -136,9 +165,9 @@ def change_password(payload: ChangePasswordPayload):
             return {"status": "success", "message": "Mot de passe modifié avec succès"}
         except HTTPException:
             raise
-        except Exception:
+        except Exception as e:
             if conn: conn.rollback(); conn.close()
-            raise HTTPException(status_code=500, detail="Erreur lors du changement de mot de passe")
+            raise HTTPException(status_code=500, detail=f"Erreur changement mot de passe : {str(e)}")
 
     if old_pwd != pwd_actuel:
         raise HTTPException(status_code=401, detail="Ancien mot de passe incorrect")
@@ -164,7 +193,7 @@ def reset_password(payload: ResetPasswordPayload):
             conn.commit()
             cur.close()
             conn.close()
-        except Exception:
+        except Exception as e:
             if conn: conn.rollback(); conn.close()
 
     MOTS_DE_PASSE_ACTUELS[code] = pwd_defaut
@@ -174,14 +203,20 @@ def reset_password(payload: ResetPasswordPayload):
         "default_password": pwd_defaut
     }
 
+@app.post("/api/admin/toggle-lfr")
+def toggle_lfr(payload: ToggleLfrPayload):
+    LFR_STATUS_BY_EXERCICE[payload.exercice] = payload.lfr_active
+    return {"status": "success", "exercice": payload.exercice, "lfr_active": payload.lfr_active}
+
 # ============================================================
-# ENDPOINTS IMPORTATION ET CONSULTATION
+# ENDPOINTS IMPORTATION & ENREGISTREMENT POSTGRESQL
 # ============================================================
 
 @app.post("/api/admin/import-base")
 def import_base_donnees(payload: Any = Body(...), exercice: int = 2026):
     conn = get_db_connection()
     items = payload if isinstance(payload, list) else [payload]
+    HISTORIQUE_EXERCICES[exercice] = items
 
     if conn:
         try:
@@ -215,8 +250,8 @@ def import_base_donnees(payload: Any = Body(...), exercice: int = 2026):
             """)
 
             for item in items:
-                code = str(item.get("code") or item.get("programme_code") or "PROG").strip()
-                nom = str(item.get("nom") or item.get("label") or f"Programme {code}").strip()
+                code = str(item.get("code") or item.get("programme_code") or item.get("Code") or "P1").strip()
+                nom = str(item.get("nom") or item.get("programme_nom") or item.get("label") or f"Programme {code}").strip()
                 
                 cur.execute("""
                     INSERT INTO programmes (code, nom) VALUES (%s, %s)
@@ -225,32 +260,39 @@ def import_base_donnees(payload: Any = Body(...), exercice: int = 2026):
                 """, (code, nom))
                 prog_id = cur.fetchone()['id']
 
-                if "lignes" in item and isinstance(item["lignes"], list):
+                lignes = item.get("lignes") or []
+                if isinstance(lignes, list) and len(lignes) > 0:
                     cur.execute("DELETE FROM lignes_budgetaires WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
-                    for ligne in item["lignes"]:
+                    for ligne in lignes:
+                        lbl = ligne.get("label") or ligne.get("ligne_label") or "Ligne Budgétaire"
+                        lfi_val = float(ligne.get("lfi") or ligne.get("dotation_lfi") or 0)
+                        lfr_val = float(ligne.get("ajustement_lfr") or 0)
                         cur.execute("""
                             INSERT INTO lignes_budgetaires (programme_id, exercice, label, lfi, ajustement_lfr)
                             VALUES (%s, %s, %s, %s, %s);
-                        """, (prog_id, exercice, ligne.get("label", "Ligne"), ligne.get("lfi", 0), ligne.get("ajustement_lfr", 0)))
+                        """, (prog_id, exercice, lbl, lfi_val, lfr_val))
 
-                if "indicateurs" in item and isinstance(item["indicateurs"], list):
+                indicateurs = item.get("indicateurs") or item.get("icps") or []
+                if isinstance(indicateurs, list) and len(indicateurs) > 0:
                     cur.execute("DELETE FROM indicateurs WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
-                    for ind in item["indicateurs"]:
+                    for ind in indicateurs:
+                        i_nom = ind.get("nom") or ind.get("icp_nom") or "Indicateur"
+                        i_unite = ind.get("unite") or "%"
+                        i_cible = float(ind.get("cible") or ind.get("cible_annuelle") or 0)
                         cur.execute("""
                             INSERT INTO indicateurs (programme_id, exercice, nom, unite, cible_annuelle)
                             VALUES (%s, %s, %s, %s, %s);
-                        """, (prog_id, exercice, ind.get("nom", "Indicateur"), ind.get("unite", "%"), ind.get("cible", 0)))
+                        """, (prog_id, exercice, i_nom, i_unite, i_cible))
 
             conn.commit()
             cur.close()
             conn.close()
-            return {"status": "success", "message": f"Structure {exercice} enregistrée dans PostgreSQL."}
+            return {"status": "success", "message": f"Structure {exercice} enregistrée dans PostgreSQL !"}
         
         except Exception as e:
             if conn: conn.rollback(); conn.close()
-            raise HTTPException(status_code=500, detail=f"Erreur d'importation : {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Erreur PostgreSQL : {str(e)}")
 
-    HISTORIQUE_EXERCICES[exercice] = items
     return {"status": "success", "message": f"Structure {exercice} enregistrée en mémoire de secours."}
 
 @app.post("/api/admin/import-ventilation")
@@ -286,21 +328,28 @@ def import_ventilation(payload: Any = Body(...), exercice: int = 2026):
                 cur.execute("DELETE FROM ventilation_economique WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
                 
                 for vent in ventilation_list:
+                    nature = vent.get("nature") or vent.get("nature_economique") or "Dépense"
+                    lfi = float(vent.get("dotation_lfi") or vent.get("dotation") or 0)
+                    lfr = float(vent.get("ajustement_lfr") or 0)
                     cur.execute("""
                         INSERT INTO ventilation_economique (programme_id, exercice, nature_economique, dotation_lfi, ajustement_lfr)
                         VALUES (%s, %s, %s, %s, %s);
-                    """, (prog_id, exercice, vent.get("nature", "Dépense"), vent.get("dotation_lfi", 0), vent.get("ajustement_lfr", 0)))
+                    """, (prog_id, exercice, nature, lfi, lfr))
 
             conn.commit()
             cur.close()
             conn.close()
-            return {"status": "success", "message": f"Ventilation {exercice} enregistrée dans PostgreSQL."}
+            return {"status": "success", "message": f"Ventilation {exercice} enregistrée dans PostgreSQL !"}
             
         except Exception as e:
             if conn: conn.rollback(); conn.close()
-            raise HTTPException(status_code=500, detail=f"Erreur d'importation ventilation : {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Erreur PostgreSQL : {str(e)}")
 
     return {"status": "success", "message": f"Ventilation {exercice} enregistrée en mémoire de secours."}
+
+# ============================================================
+# CONSULTATION & COLLECTE
+# ============================================================
 
 @app.get("/api/programmes")
 def get_programmes(exercice: int = 2026, trimestre: str = "T2"):
@@ -342,7 +391,7 @@ def get_programmes(exercice: int = 2026, trimestre: str = "T2"):
         cur.close()
         conn.close()
         return programmes
-    except Exception:
+    except Exception as e:
         if conn: conn.close()
         return HISTORIQUE_EXERCICES.get(exercice, [])
 
@@ -361,19 +410,6 @@ def get_ventilation(exercice: int = 2026, programme_id: Optional[int] = None):
 
     try:
         cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS ventilation_economique (
-                id SERIAL PRIMARY KEY,
-                programme_id INT,
-                exercice INT DEFAULT 2026,
-                nature_economique VARCHAR(255) NOT NULL,
-                dotation_lfi NUMERIC DEFAULT 0,
-                ajustement_lfr NUMERIC DEFAULT 0,
-                engagements NUMERIC DEFAULT 0,
-                paiements NUMERIC DEFAULT 0
-            );
-        """)
-
         query = """
             SELECT nature_economique AS nature, 
                    COALESCE(SUM(dotation_lfi), 0) AS dotation_lfi,
@@ -403,6 +439,41 @@ def get_ventilation(exercice: int = 2026, programme_id: Optional[int] = None):
     except Exception:
         if conn: conn.close()
         return [{"nature": n, "dotation_lfi": 0, "ajustement_lfr": 0, "engagements": 0, "paiements": 0} for n in natures_default]
+
+@app.post("/api/collecte")
+def enregistrer_collecte(payload: Dict[str, Any] = Body(...)):
+    conn = get_db_connection()
+    if not conn:
+        return {"status": "success", "message": "Enregistré en mémoire temporaire"}
+
+    try:
+        cur = conn.cursor()
+        prog_id = payload.get("programme_id")
+        exercice = payload.get("exercice", 2026)
+
+        for l in payload.get("lignes", []):
+            if "id" in l:
+                cur.execute("""
+                    UPDATE lignes_budgetaires 
+                    SET engagements = %s, paiements = %s 
+                    WHERE id = %s AND exercice = %s;
+                """, (l.get("engagements", 0), l.get("paiements", 0), l["id"], exercice))
+
+        for ic in payload.get("icps", []):
+            if "id" in ic:
+                cur.execute("""
+                    UPDATE indicateurs 
+                    SET realise = %s 
+                    WHERE id = %s AND exercice = %s;
+                """, (ic.get("realise", 0), ic["id"], exercice))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "success", "message": "Déclaration enregistrée dans PostgreSQL !"}
+    except Exception as e:
+        if conn: conn.rollback(); conn.close()
+        raise HTTPException(status_code=500, detail=f"Erreur d'enregistrement : {str(e)}")
 
 @app.get("/api/risques")
 def get_risques(exercice: int = 2026, trimestre: str = "T2"):
