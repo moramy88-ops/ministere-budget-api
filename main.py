@@ -59,10 +59,6 @@ class ChangePasswordPayload(BaseModel):
 class ResetPasswordPayload(BaseModel):
     programme_code: str
 
-class LfrTogglePayload(BaseModel):
-    exercice: int
-    lfr_active: bool
-
 # --- ENDPOINTS AUTHENTIFICATION ---
 @app.post("/api/admin/login")
 def admin_login(payload: AdminLoginPayload):
@@ -179,7 +175,7 @@ def reset_password(payload: ResetPasswordPayload):
     }
 
 # ============================================================
-# ENDPOINTS IMPORTATION DES DONNÉES (STRUCTURE & VENTILATION)
+# ENDPOINTS IMPORTATION ET CONSULTATION
 # ============================================================
 
 @app.post("/api/admin/import-base")
@@ -306,11 +302,8 @@ def import_ventilation(payload: Any = Body(...), exercice: int = 2026):
 
     return {"status": "success", "message": f"Ventilation {exercice} enregistrée en mémoire de secours."}
 
-# ============================================================
-# ENDPOINTS CONSULTATION ET RAPPORTS
-# ============================================================
-
-def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
+@app.get("/api/programmes")
+def get_programmes(exercice: int = 2026, trimestre: str = "T2"):
     conn = get_db_connection()
     lfr_status = LFR_STATUS_BY_EXERCICE.get(exercice, False)
 
@@ -353,24 +346,45 @@ def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
         if conn: conn.close()
         return HISTORIQUE_EXERCICES.get(exercice, [])
 
-@app.get("/api/programmes")
-def get_programmes(exercice: int = 2026, trimestre: str = "T2"):
-    return _fetch_programmes_data(exercice, trimestre)
-
 @app.get("/api/ventilation")
 def get_ventilation(exercice: int = 2026, programme_id: Optional[int] = None):
     conn = get_db_connection()
+    natures_default = [
+        "Dépenses de personnel",
+        "Dépenses de fonctionnement",
+        "Transferts courants",
+        "Investissements exécutés par l'État"
+    ]
+    
     if not conn:
-        return []
+        return [{"nature": n, "dotation_lfi": 0, "ajustement_lfr": 0, "engagements": 0, "paiements": 0} for n in natures_default]
 
     try:
         cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ventilation_economique (
+                id SERIAL PRIMARY KEY,
+                programme_id INT,
+                exercice INT DEFAULT 2026,
+                nature_economique VARCHAR(255) NOT NULL,
+                dotation_lfi NUMERIC DEFAULT 0,
+                ajustement_lfr NUMERIC DEFAULT 0,
+                engagements NUMERIC DEFAULT 0,
+                paiements NUMERIC DEFAULT 0
+            );
+        """)
+
         query = """
-            SELECT nature_economique AS nature, SUM(COALESCE(dotation_lfi, 0)) AS dotation_lfi,
-                   SUM(COALESCE(ajustement_lfr, 0)) AS ajustement_lfr, SUM(engagements) AS engagements, SUM(paiements) AS paiements
-            FROM ventilation_economique WHERE (exercice = %s OR exercice IS NULL)
+            SELECT nature_economique AS nature, 
+                   COALESCE(SUM(dotation_lfi), 0) AS dotation_lfi,
+                   COALESCE(SUM(ajustement_lfr), 0) AS ajustement_lfr, 
+                   COALESCE(SUM(engagements), 0) AS engagements, 
+                   COALESCE(SUM(paiements), 0) AS paiements
+            FROM ventilation_economique 
+            WHERE (exercice = %s OR exercice IS NULL)
         """
         params = [exercice]
+        
         if programme_id:
             query += " AND programme_id = %s"
             params.append(programme_id)
@@ -380,10 +394,15 @@ def get_ventilation(exercice: int = 2026, programme_id: Optional[int] = None):
         results = cur.fetchall()
         cur.close()
         conn.close()
-        return results if results else []
+
+        if not results:
+            return [{"nature": n, "dotation_lfi": 0, "ajustement_lfr": 0, "engagements": 0, "paiements": 0} for n in natures_default]
+
+        return results
+
     except Exception:
         if conn: conn.close()
-        return []
+        return [{"nature": n, "dotation_lfi": 0, "ajustement_lfr": 0, "engagements": 0, "paiements": 0} for n in natures_default]
 
 @app.get("/api/risques")
 def get_risques(exercice: int = 2026, trimestre: str = "T2"):
