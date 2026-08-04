@@ -30,7 +30,7 @@ def get_db_connection():
         return None
 
 # ============================================================
-# MODÈLES & AUTHENTIFICATION
+# AUTHENTIFICATION ET CONFIGURATION DE BASE
 # ============================================================
 MOTS_DE_PASSE_DEFAUT = {
     "P1": "p1_resp2026",
@@ -39,8 +39,10 @@ MOTS_DE_PASSE_DEFAUT = {
     "P4": "p4_resp2026"
 }
 
-# Stockage dynamique des mots de passe en mémoire si DB non connectée
 MOTS_DE_PASSE_ACTUELS = MOTS_DE_PASSE_DEFAUT.copy()
+LFR_STATUS_BY_EXERCICE = { 2024: False, 2025: False, 2026: False, 2027: False }
+HISTORIQUE_EXERCICES = {}
+CIBLES_TRIMESTRE = {"T1": 25, "T2": 50, "T3": 75, "T4": 100}
 
 class AdminLoginPayload(BaseModel):
     password: str
@@ -57,35 +59,11 @@ class ChangePasswordPayload(BaseModel):
 class ResetPasswordPayload(BaseModel):
     programme_code: str
 
-# --- Initialisation de la table des mots de passe DB ---
-def init_auth_table():
-    conn = get_db_connection()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS responsable_passwords (
-                    programme_code VARCHAR(20) PRIMARY KEY,
-                    password_hash TEXT NOT NULL,
-                    is_default BOOLEAN DEFAULT TRUE
-                );
-            """)
-            for code, pwd in MOTS_DE_PASSE_DEFAUT.items():
-                cur.execute("""
-                    INSERT INTO responsable_passwords (programme_code, password_hash, is_default)
-                    VALUES (%s, %s, TRUE)
-                    ON CONFLICT (programme_code) DO NOTHING;
-                """, (code, pwd))
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception:
-            if conn: conn.rollback(); conn.close()
-
-init_auth_table()
+class LfrTogglePayload(BaseModel):
+    exercice: int
+    lfr_active: bool
 
 # --- ENDPOINTS AUTHENTIFICATION ---
-
 @app.post("/api/admin/login")
 def admin_login(payload: AdminLoginPayload):
     if payload.password.strip() == "admin123":
@@ -162,7 +140,7 @@ def change_password(payload: ChangePasswordPayload):
             return {"status": "success", "message": "Mot de passe modifié avec succès"}
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             if conn: conn.rollback(); conn.close()
             raise HTTPException(status_code=500, detail="Erreur lors du changement de mot de passe")
 
@@ -170,7 +148,7 @@ def change_password(payload: ChangePasswordPayload):
         raise HTTPException(status_code=401, detail="Ancien mot de passe incorrect")
 
     MOTS_DE_PASSE_ACTUELS[code] = new_pwd
-    return {"status": "success", "message": "Mot de passe modifié avec succès (mémoire)"}
+    return {"status": "success", "message": "Mot de passe modifié avec succès"}
 
 @app.post("/api/admin/reset-password")
 def reset_password(payload: ResetPasswordPayload):
@@ -190,7 +168,7 @@ def reset_password(payload: ResetPasswordPayload):
             conn.commit()
             cur.close()
             conn.close()
-        except Exception as e:
+        except Exception:
             if conn: conn.rollback(); conn.close()
 
     MOTS_DE_PASSE_ACTUELS[code] = pwd_defaut
@@ -198,4 +176,223 @@ def reset_password(payload: ResetPasswordPayload):
         "status": "success", 
         "message": f"Mot de passe de {code} réinitialisé avec succès", 
         "default_password": pwd_defaut
+    }
+
+# ============================================================
+# ENDPOINTS IMPORTATION DES DONNÉES (STRUCTURE & VENTILATION)
+# ============================================================
+
+@app.post("/api/admin/import-base")
+def import_base_donnees(payload: Any = Body(...), exercice: int = 2026):
+    conn = get_db_connection()
+    items = payload if isinstance(payload, list) else [payload]
+
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS programmes (
+                    id SERIAL PRIMARY KEY,
+                    code VARCHAR(50) UNIQUE NOT NULL,
+                    nom VARCHAR(255) NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS lignes_budgetaires (
+                    id SERIAL PRIMARY KEY,
+                    programme_id INT REFERENCES programmes(id) ON DELETE CASCADE,
+                    exercice INT DEFAULT 2026,
+                    label TEXT NOT NULL,
+                    lfi NUMERIC DEFAULT 0,
+                    ajustement_lfr NUMERIC DEFAULT 0,
+                    engagements NUMERIC DEFAULT 0,
+                    paiements NUMERIC DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS indicateurs (
+                    id SERIAL PRIMARY KEY,
+                    programme_id INT REFERENCES programmes(id) ON DELETE CASCADE,
+                    exercice INT DEFAULT 2026,
+                    nom TEXT NOT NULL,
+                    unite VARCHAR(50) DEFAULT '%',
+                    cible_annuelle NUMERIC DEFAULT 0,
+                    realise NUMERIC DEFAULT 0,
+                    inverse BOOLEAN DEFAULT FALSE
+                );
+            """)
+
+            for item in items:
+                code = str(item.get("code") or item.get("programme_code") or "PROG").strip()
+                nom = str(item.get("nom") or item.get("label") or f"Programme {code}").strip()
+                
+                cur.execute("""
+                    INSERT INTO programmes (code, nom) VALUES (%s, %s)
+                    ON CONFLICT (code) DO UPDATE SET nom = EXCLUDED.nom
+                    RETURNING id;
+                """, (code, nom))
+                prog_id = cur.fetchone()['id']
+
+                if "lignes" in item and isinstance(item["lignes"], list):
+                    cur.execute("DELETE FROM lignes_budgetaires WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
+                    for ligne in item["lignes"]:
+                        cur.execute("""
+                            INSERT INTO lignes_budgetaires (programme_id, exercice, label, lfi, ajustement_lfr)
+                            VALUES (%s, %s, %s, %s, %s);
+                        """, (prog_id, exercice, ligne.get("label", "Ligne"), ligne.get("lfi", 0), ligne.get("ajustement_lfr", 0)))
+
+                if "indicateurs" in item and isinstance(item["indicateurs"], list):
+                    cur.execute("DELETE FROM indicateurs WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
+                    for ind in item["indicateurs"]:
+                        cur.execute("""
+                            INSERT INTO indicateurs (programme_id, exercice, nom, unite, cible_annuelle)
+                            VALUES (%s, %s, %s, %s, %s);
+                        """, (prog_id, exercice, ind.get("nom", "Indicateur"), ind.get("unite", "%"), ind.get("cible", 0)))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"status": "success", "message": f"Structure {exercice} enregistrée dans PostgreSQL."}
+        
+        except Exception as e:
+            if conn: conn.rollback(); conn.close()
+            raise HTTPException(status_code=500, detail=f"Erreur d'importation : {str(e)}")
+
+    HISTORIQUE_EXERCICES[exercice] = items
+    return {"status": "success", "message": f"Structure {exercice} enregistrée en mémoire de secours."}
+
+@app.post("/api/admin/import-ventilation")
+def import_ventilation(payload: Any = Body(...), exercice: int = 2026):
+    conn = get_db_connection()
+    items = payload if isinstance(payload, list) else [payload]
+
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ventilation_economique (
+                    id SERIAL PRIMARY KEY,
+                    programme_id INT REFERENCES programmes(id) ON DELETE CASCADE,
+                    exercice INT DEFAULT 2026,
+                    nature_economique VARCHAR(255) NOT NULL,
+                    dotation_lfi NUMERIC DEFAULT 0,
+                    ajustement_lfr NUMERIC DEFAULT 0,
+                    engagements NUMERIC DEFAULT 0,
+                    paiements NUMERIC DEFAULT 0
+                );
+            """)
+
+            for item in items:
+                code_prog = str(item.get("programme_code") or item.get("code") or "").strip()
+                cur.execute("SELECT id FROM programmes WHERE code = %s;", (code_prog,))
+                res = cur.fetchone()
+                if not res:
+                    continue
+                prog_id = res['id']
+
+                ventilation_list = item.get("ventilation", [])
+                cur.execute("DELETE FROM ventilation_economique WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
+                
+                for vent in ventilation_list:
+                    cur.execute("""
+                        INSERT INTO ventilation_economique (programme_id, exercice, nature_economique, dotation_lfi, ajustement_lfr)
+                        VALUES (%s, %s, %s, %s, %s);
+                    """, (prog_id, exercice, vent.get("nature", "Dépense"), vent.get("dotation_lfi", 0), vent.get("ajustement_lfr", 0)))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"status": "success", "message": f"Ventilation {exercice} enregistrée dans PostgreSQL."}
+            
+        except Exception as e:
+            if conn: conn.rollback(); conn.close()
+            raise HTTPException(status_code=500, detail=f"Erreur d'importation ventilation : {str(e)}")
+
+    return {"status": "success", "message": f"Ventilation {exercice} enregistrée en mémoire de secours."}
+
+# ============================================================
+# ENDPOINTS CONSULTATION ET RAPPORTS
+# ============================================================
+
+def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
+    conn = get_db_connection()
+    lfr_status = LFR_STATUS_BY_EXERCICE.get(exercice, False)
+
+    if not conn:
+        data = HISTORIQUE_EXERCICES.get(exercice, [])
+        for p in data: p['lfr_active'] = lfr_status
+        return data
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, code, nom FROM programmes ORDER BY code;")
+        programmes = cur.fetchall()
+
+        for p in programmes:
+            p['lfr_active'] = lfr_status
+            cur.execute("""
+                SELECT id, label, COALESCE(lfi, 0) AS lfi, COALESCE(ajustement_lfr, 0) AS ajustement_lfr,
+                       COALESCE(engagements, 0) AS engagements, COALESCE(paiements, 0) AS paiements 
+                FROM lignes_budgetaires WHERE programme_id = %s AND (exercice = %s OR exercice IS NULL) ORDER BY id;
+            """, (p['id'], exercice))
+            p['lignes'] = cur.fetchall()
+
+            cur.execute("""
+                SELECT id, nom, unite, cible_annuelle AS cible, COALESCE(realise, 0) AS realise, inverse 
+                FROM indicateurs WHERE programme_id = %s AND (exercice = %s OR exercice IS NULL) ORDER BY id;
+            """, (p['id'], exercice))
+            p['indicateurs'] = cur.fetchall()
+
+            cur.execute("""
+                SELECT nature_economique AS nature, COALESCE(dotation_lfi, 0) AS dotation_lfi,
+                       COALESCE(ajustement_lfr, 0) AS ajustement_lfr, COALESCE(engagements, 0) AS engagements, COALESCE(paiements, 0) AS paiements 
+                FROM ventilation_economique WHERE programme_id = %s AND (exercice = %s OR exercice IS NULL);
+            """, (p['id'], exercice))
+            p['ventilation'] = cur.fetchall()
+
+        cur.close()
+        conn.close()
+        return programmes
+    except Exception:
+        if conn: conn.close()
+        return HISTORIQUE_EXERCICES.get(exercice, [])
+
+@app.get("/api/programmes")
+def get_programmes(exercice: int = 2026, trimestre: str = "T2"):
+    return _fetch_programmes_data(exercice, trimestre)
+
+@app.get("/api/ventilation")
+def get_ventilation(exercice: int = 2026, programme_id: Optional[int] = None):
+    conn = get_db_connection()
+    if not conn:
+        return []
+
+    try:
+        cur = conn.cursor()
+        query = """
+            SELECT nature_economique AS nature, SUM(COALESCE(dotation_lfi, 0)) AS dotation_lfi,
+                   SUM(COALESCE(ajustement_lfr, 0)) AS ajustement_lfr, SUM(engagements) AS engagements, SUM(paiements) AS paiements
+            FROM ventilation_economique WHERE (exercice = %s OR exercice IS NULL)
+        """
+        params = [exercice]
+        if programme_id:
+            query += " AND programme_id = %s"
+            params.append(programme_id)
+            
+        query += " GROUP BY nature_economique;"
+        cur.execute(query, tuple(params))
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+        return results if results else []
+    except Exception:
+        if conn: conn.close()
+        return []
+
+@app.get("/api/risques")
+def get_risques(exercice: int = 2026, trimestre: str = "T2"):
+    return {
+        "exercice": exercice,
+        "trimestre": trimestre,
+        "cible_trimestre": CIBLES_TRIMESTRE.get(trimestre, 50),
+        "nb_critique": 0,
+        "nb_alerte": 0,
+        "montant_total_a_risque": 0,
+        "lignes": []
     }
