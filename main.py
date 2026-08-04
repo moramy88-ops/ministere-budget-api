@@ -119,20 +119,14 @@ def admin_login(payload: AdminLoginPayload):
         return {"status": "success", "token": "admin-session-active"}
     raise HTTPException(status_code=401, detail="Mot de passe administrateur incorrect")
 
-# Endpoint d'importation globale (Correction de l'erreur 404)
+# Endpoint 1 : Importation de la Structure (Programmes + Lignes + Indicateurs)
 @app.post("/api/admin/import-base")
 def import_base_donnees(payload: List[Dict[str, Any]] = Body(...), exercice: int = 2026):
-    """
-    Importe les programmes, leurs lignes budgétaires et leurs indicateurs
-    pour un exercice donné.
-    """
     conn = get_db_connection()
     
     if conn:
         try:
             cur = conn.cursor()
-            
-            # Création automatique des tables si nécessaires
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS programmes (
                     id SERIAL PRIMARY KEY,
@@ -159,6 +153,57 @@ def import_base_donnees(payload: List[Dict[str, Any]] = Body(...), exercice: int
                     realise NUMERIC DEFAULT 0,
                     inverse BOOLEAN DEFAULT FALSE
                 );
+            """)
+
+            for item in payload:
+                code = item.get("code")
+                nom = item.get("nom", f"Programme {code}")
+                
+                cur.execute("""
+                    INSERT INTO programmes (code, nom) VALUES (%s, %s)
+                    ON CONFLICT (code) DO UPDATE SET nom = EXCLUDED.nom
+                    RETURNING id;
+                """, (code, nom))
+                prog_id = cur.fetchone()['id']
+
+                if "lignes" in item and isinstance(item["lignes"], list):
+                    cur.execute("DELETE FROM lignes_budgetaires WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
+                    for ligne in item["lignes"]:
+                        cur.execute("""
+                            INSERT INTO lignes_budgetaires (programme_id, exercice, label, lfi, ajustement_lfr)
+                            VALUES (%s, %s, %s, %s, %s);
+                        """, (prog_id, exercice, ligne.get("label"), ligne.get("lfi", 0), ligne.get("ajustement_lfr", 0)))
+
+                if "indicateurs" in item and isinstance(item["indicateurs"], list):
+                    cur.execute("DELETE FROM indicateurs WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
+                    for ind in item["indicateurs"]:
+                        cur.execute("""
+                            INSERT INTO indicateurs (programme_id, exercice, nom, unite, cible_annuelle)
+                            VALUES (%s, %s, %s, %s, %s);
+                        """, (prog_id, exercice, ind.get("nom"), ind.get("unite", "%"), ind.get("cible", 0)))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"status": "success", "message": f"Structure {exercice} importée dans PostgreSQL."}
+        
+        except Exception as e:
+            if conn: conn.rollback(); conn.close()
+            raise HTTPException(status_code=500, detail=f"Erreur enregistrement structure : {str(e)}")
+
+    # Sauvegarde en mémoire de secours
+    HISTORIQUE_EXERCICES[exercice] = payload
+    return {"status": "success", "message": f"Structure {exercice} importée en mémoire de secours."}
+
+# Endpoint 2 : Importation exclusive de la Ventilation Économique
+@app.post("/api/admin/import-ventilation")
+def import_ventilation(payload: List[Dict[str, Any]] = Body(...), exercice: int = 2026):
+    conn = get_db_connection()
+    
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS ventilation_economique (
                     id SERIAL PRIMARY KEY,
                     programme_id INT REFERENCES programmes(id) ON DELETE CASCADE,
@@ -172,96 +217,42 @@ def import_base_donnees(payload: List[Dict[str, Any]] = Body(...), exercice: int
             """)
 
             for item in payload:
-                code = item.get("code")
-                nom = item.get("nom", f"Programme {code}")
+                code_prog = item.get("programme_code") or item.get("code")
                 
-                # Insertion ou récupération du programme
-                cur.execute("""
-                    INSERT INTO programmes (code, nom) VALUES (%s, %s)
-                    ON CONFLICT (code) DO UPDATE SET nom = EXCLUDED.nom
-                    RETURNING id;
-                """, (code, nom))
-                prog_id = cur.fetchone()['id']
+                # Récupération de l'ID du programme
+                cur.execute("SELECT id FROM programmes WHERE code = %s;", (code_prog,))
+                res = cur.fetchone()
+                if not res:
+                    continue
+                prog_id = res['id']
 
-                # Traitement des Lignes Budgétaires
-                if "lignes" in item and isinstance(item["lignes"], list):
-                    cur.execute("DELETE FROM lignes_budgetaires WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
-                    for ligne in item["lignes"]:
-                        cur.execute("""
-                            INSERT INTO lignes_budgetaires (programme_id, exercice, label, lfi, ajustement_lfr)
-                            VALUES (%s, %s, %s, %s, %s);
-                        """, (prog_id, exercice, ligne.get("label"), ligne.get("lfi", 0), ligne.get("ajustement_lfr", 0)))
-
-                # Traitement des Indicateurs
-                if "indicateurs" in item and isinstance(item["indicateurs"], list):
-                    cur.execute("DELETE FROM indicateurs WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
-                    for ind in item["indicateurs"]:
-                        cur.execute("""
-                            INSERT INTO indicateurs (programme_id, exercice, nom, unite, cible_annuelle)
-                            VALUES (%s, %s, %s, %s, %s);
-                        """, (prog_id, exercice, ind.get("nom"), ind.get("unite", "%"), ind.get("cible", 0)))
-
-                # Traitement de la Ventilation Économique (si présente)
-                if "ventilation" in item and isinstance(item["ventilation"], list):
-                    cur.execute("DELETE FROM ventilation_economique WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
-                    for vent in item["ventilation"]:
-                        cur.execute("""
-                            INSERT INTO ventilation_economique (programme_id, exercice, nature_economique, dotation_lfi, ajustement_lfr)
-                            VALUES (%s, %s, %s, %s, %s);
-                        """, (prog_id, exercice, vent.get("nature"), vent.get("dotation_lfi", 0), vent.get("ajustement_lfr", 0)))
+                ventilation_list = item.get("ventilation", [])
+                cur.execute("DELETE FROM ventilation_economique WHERE programme_id = %s AND exercice = %s;", (prog_id, exercice))
+                
+                for vent in ventilation_list:
+                    cur.execute("""
+                        INSERT INTO ventilation_economique (programme_id, exercice, nature_economique, dotation_lfi, ajustement_lfr)
+                        VALUES (%s, %s, %s, %s, %s);
+                    """, (prog_id, exercice, vent.get("nature"), vent.get("dotation_lfi", 0), vent.get("ajustement_lfr", 0)))
 
             conn.commit()
             cur.close()
             conn.close()
-            return {"status": "success", "message": f"Données de l'exercice {exercice} importées avec succès dans la base PostgreSQL."}
-        
+            return {"status": "success", "message": f"Ventilation {exercice} enregistrée dans PostgreSQL."}
+            
         except Exception as e:
-            if conn:
-                conn.rollback()
-                conn.close()
-            raise HTTPException(status_code=500, detail=f"Erreur lors de l'enregistrement PostgreSQL : {str(e)}")
+            if conn: conn.rollback(); conn.close()
+            raise HTTPException(status_code=500, detail=f"Erreur enregistrement ventilation : {str(e)}")
 
-    # Mode secours (Mémoire) si la BDD n'est pas connectée
-    parsed_programmes = []
-    for idx, item in enumerate(payload, start=1):
-        parsed_programmes.append({
-            "id": idx,
-            "code": item.get("code"),
-            "nom": item.get("nom"),
-            "t1": 0, "t2": 0, "t3": 0, "t4": 0,
-            "lignes": [
-                {
-                    "id": 1000 + i,
-                    "label": l.get("label"),
-                    "lfi": l.get("lfi", 0),
-                    "ajustement_lfr": l.get("ajustement_lfr", 0),
-                    "engagements": 0,
-                    "paiements": 0
-                } for i, l in enumerate(item.get("lignes", []))
-            ],
-            "indicateurs": [
-                {
-                    "id": 2000 + i,
-                    "nom": ind.get("nom"),
-                    "unite": ind.get("unite", "%"),
-                    "cible": ind.get("cible", 0),
-                    "realise": 0,
-                    "inverse": False
-                } for i, ind in enumerate(item.get("indicateurs", []))
-            ],
-            "ventilation": [
-                {
-                    "nature": v.get("nature"),
-                    "dotation_lfi": v.get("dotation_lfi", 0),
-                    "ajustement_lfr": v.get("ajustement_lfr", 0),
-                    "engagements": 0,
-                    "paiements": 0
-                } for i, v in enumerate(item.get("ventilation", []))
-            ]
-        })
-    
-    HISTORIQUE_EXERCICES[exercice] = parsed_programmes
-    return {"status": "success", "message": f"Données de l'exercice {exercice} importées en mémoire de secours."}
+    # Mise à jour de la mémoire de secours
+    if exercice in HISTORIQUE_EXERCICES:
+        for item in payload:
+            code = item.get("programme_code") or item.get("code")
+            for prog in HISTORIQUE_EXERCICES[exercice]:
+                if prog.get("code") == code:
+                    prog["ventilation"] = item.get("ventilation", [])
+
+    return {"status": "success", "message": f"Ventilation {exercice} enregistrée en mémoire de secours."}
 
 # ============================================================
 # CHARGEMENT DES PROGRAMMES
@@ -284,27 +275,7 @@ def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
             pass
 
     if not conn:
-        if exercice not in HISTORIQUE_EXERCICES:
-            HISTORIQUE_EXERCICES[exercice] = [
-                {
-                    "id": 1, "code": "P1", "nom": "Pilotage, Coordination et Gestion administrative", "t1": 10.0, "t2": 21.0, "t3": 0, "t4": 0,
-                    "lignes": [
-                        {"id": 101, "label": "Organiser le Pèlerinage aux Lieux saints de l'Islam", "lfi": 1205687000, "ajustement_lfr": 0, "engagements": 300000000, "paiements": 210000000}
-                    ],
-                    "indicateurs": [{"id": 201, "nom": "Niveau de satisfaction des pèlerins de la Mecque", "unite": "%", "cible": 87, "realise": 80, "inverse": False}],
-                    "ventilation": [{"nature": "Dépenses de personnel", "dotation_lfi": 1731712570, "ajustement_lfr": 0, "engagements": 300000000, "paiements": 210000000}]
-                },
-                {
-                    "id": 2, "code": "P2", "nom": "Coopération bilatérale et multilatérale", "t1": 8.5, "t2": 18.5, "t3": 0, "t4": 0,
-                    "lignes": [
-                        {"id": 103, "label": "Tenir des commissions mixtes", "lfi": 175603000, "ajustement_lfr": 0, "engagements": 50000000, "paiements": 30000000}
-                    ],
-                    "indicateurs": [{"id": 202, "nom": "Pourcentage de commissions mixtes réalisées", "unite": "%", "cible": 56, "realise": 30, "inverse": False}],
-                    "ventilation": [{"nature": "Dépenses de fonctionnement", "dotation_lfi": 30067370806, "ajustement_lfr": 0, "engagements": 1000000000, "paiements": 500000000}]
-                }
-            ]
-        
-        data = HISTORIQUE_EXERCICES[exercice]
+        data = HISTORIQUE_EXERCICES.get(exercice, [])
         for p in data: p['lfr_active'] = lfr_status
         return data
 
@@ -412,10 +383,10 @@ def get_ventilation(exercice: int = 2026, programme_id: Optional[int] = None):
     conn = get_db_connection()
     if not conn:
         return [
-            {"nature": "Dépenses de personnel", "dotation_lfi": 1400000000, "ajustement_lfr": 50000000, "engagements": 500000000, "paiements": 321000000},
-            {"nature": "Dépenses de fonctionnement", "dotation_lfi": 1700000000, "ajustement_lfr": -20000000, "engagements": 480000000, "paiements": 302000000},
-            {"nature": "Transferts courants", "dotation_lfi": 600000000, "ajustement_lfr": 0, "engagements": 150000000, "paiements": 111000000},
-            {"nature": "Investissements exécutés par l'État", "dotation_lfi": 3000000000, "ajustement_lfr": 200000000, "engagements": 1200000000, "paiements": 900000000}
+            {"nature": "Dépenses de personnel", "dotation_lfi": 1731712570, "ajustement_lfr": 0, "engagements": 0, "paiements": 0},
+            {"nature": "Dépenses de fonctionnement", "dotation_lfi": 7491404543, "ajustement_lfr": 0, "engagements": 0, "paiements": 0},
+            {"nature": "Transferts courants", "dotation_lfi": 1373814000, "ajustement_lfr": 0, "engagements": 0, "paiements": 0},
+            {"nature": "Investissements exécutés par l'État", "dotation_lfi": 626000000, "ajustement_lfr": 0, "engagements": 0, "paiements": 0}
         ]
 
     try:
