@@ -124,7 +124,7 @@ def admin_login(payload: AdminLoginPayload):
     raise HTTPException(status_code=401, detail="Mot de passe administrateur incorrect")
 
 # ============================================================
-# CHARGEMENT DES DONNÉES DE BASE
+# CHARGEMENT DES 4 PROGRAMMES DE BASE
 # ============================================================
 
 def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
@@ -147,7 +147,7 @@ def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
         if exercice not in HISTORIQUE_EXERCICES:
             HISTORIQUE_EXERCICES[exercice] = [
                 {
-                    "id": 1, "code": "P01", "nom": "Enseignement Supérieur", "t1": 10.0, "t2": 21.0, "t3": 0, "t4": 0,
+                    "id": 1, "code": "P01", "nom": "Éducation", "t1": 10.0, "t2": 21.0, "t3": 0, "t4": 0,
                     "lignes": [
                         {"id": 101, "label": "Construction et équipement d'écoles", "lfi": 1000000000, "ajustement_lfr": 150000000, "engagements": 300000000, "paiements": 210000000}
                     ],
@@ -155,12 +155,28 @@ def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
                     "ventilation": [{"nature": "Dépenses de personnel", "dotation_lfi": 800000000, "ajustement_lfr": 50000000, "engagements": 300000000, "paiements": 210000000}]
                 },
                 {
-                    "id": 2, "code": "P02", "nom": "Santé Publique", "t1": 8.5, "t2": 18.5, "t3": 0, "t4": 0,
+                    "id": 2, "code": "P02", "nom": "Santé", "t1": 8.5, "t2": 18.5, "t3": 0, "t4": 0,
                     "lignes": [
                         {"id": 103, "label": "Approvisionnement en médicaments", "lfi": 800000000, "ajustement_lfr": -50000000, "engagements": 250000000, "paiements": 148000000}
                     ],
                     "indicateurs": [{"id": 202, "nom": "Taux de couverture vaccinale", "unite": "%", "cible": 90, "realise": 82, "inverse": False}],
                     "ventilation": [{"nature": "Transferts courants", "dotation_lfi": 600000000, "ajustement_lfr": 0, "engagements": 150000000, "paiements": 111000000}]
+                },
+                {
+                    "id": 3, "code": "P03", "nom": "Infrastructures", "t1": 12.0, "t2": 30.0, "t3": 0, "t4": 0,
+                    "lignes": [
+                        {"id": 105, "label": "Entretien du réseau routier", "lfi": 2000000000, "ajustement_lfr": 200000000, "engagements": 800000000, "paiements": 600000000}
+                    ],
+                    "indicateurs": [{"id": 203, "nom": "Routes bitumées ou entretenues", "unite": "Km", "cible": 150, "realise": 45, "inverse": False}],
+                    "ventilation": [{"nature": "Investissements exécutés par l'État", "dotation_lfi": 3000000000, "ajustement_lfr": 200000000, "engagements": 1200000000, "paiements": 900000000}]
+                },
+                {
+                    "id": 4, "code": "P04", "nom": "Gouvernance", "t1": 9.0, "t2": 19.7, "t3": 0, "t4": 0,
+                    "lignes": [
+                        {"id": 107, "label": "Modernisation des services", "lfi": 600000000, "ajustement_lfr": 0, "engagements": 180000000, "paiements": 118200000}
+                    ],
+                    "indicateurs": [{"id": 204, "nom": "Taux de dématérialisation", "unite": "%", "cible": 80, "realise": 65, "inverse": False}],
+                    "ventilation": [{"nature": "Dépenses de fonctionnement", "dotation_lfi": 1000000000, "ajustement_lfr": 0, "engagements": 280000000, "paiements": 197000000}]
                 }
             ]
         
@@ -205,6 +221,67 @@ def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
 @app.get("/api/programmes")
 def get_programmes(exercice: int = 2026, trimestre: str = "T2"):
     return _fetch_programmes_data(exercice, trimestre)
+
+# ============================================================
+# CALCUL ET ENDPOINT DES RISQUES
+# ============================================================
+def _taux_et_assiette(ligne: dict, lfr_active: bool):
+    lfi = float(ligne.get("lfi", 0) or 0)
+    lfr = float(ligne.get("ajustement_lfr", 0) or 0) if lfr_active else 0.0
+    assiette = lfi + lfr
+    paiements = float(ligne.get("paiements", 0) or 0)
+    taux = (paiements / assiette * 100) if assiette > 0 else 0.0
+    return taux, assiette
+
+def _niveau_risque(taux: float, cible: float):
+    ecart = taux - cible
+    if ecart <= -SEUIL_CRITIQUE: return "Critique"
+    if ecart <= -SEUIL_ALERTE: return "Alerte"
+    return "Normal"
+
+def _calculer_risques(exercice: int, trimestre: str):
+    cible = CIBLES_TRIMESTRE.get(trimestre, 50)
+    programmes = _fetch_programmes_data(exercice, trimestre)
+    lfr_active = LFR_STATUS_BY_EXERCICE.get(exercice, False)
+
+    lignes_risque = []
+    for p in programmes:
+        nom_prog = p.get("nom", "Programme")
+        for l in (p.get("lignes") or []):
+            taux, assiette = _taux_et_assiette(l, lfr_active)
+            if assiette <= 0: continue
+            niveau = _niveau_risque(taux, cible)
+            if niveau == "Normal": continue
+            montant_a_risque = assiette - float(l.get("paiements", 0) or 0)
+            lignes_risque.append({
+                "programme": nom_prog,
+                "ligne_id": l.get("id"),
+                "label": l.get("label"),
+                "montant_prevu": round(assiette, 2),
+                "montant_execute": round(float(l.get("paiements", 0) or 0), 2),
+                "montant_a_risque": round(max(montant_a_risque, 0), 2),
+                "taux_execution": round(taux, 1),
+                "cible": cible,
+                "ecart": round(taux - cible, 1),
+                "niveau_risque": niveau,
+            })
+
+    ordre = {"Critique": 0, "Alerte": 1}
+    lignes_risque.sort(key=lambda x: (ordre.get(x["niveau_risque"], 2), -x["montant_a_risque"]))
+    return lignes_risque
+
+@app.get("/api/risques")
+def get_risques(exercice: int = 2026, trimestre: str = "T2"):
+    lignes = _calculer_risques(exercice, trimestre)
+    return {
+        "exercice": exercice,
+        "trimestre": trimestre,
+        "cible_trimestre": CIBLES_TRIMESTRE.get(trimestre, 50),
+        "nb_critique": sum(1 for l in lignes if l["niveau_risque"] == "Critique"),
+        "nb_alerte": sum(1 for l in lignes if l["niveau_risque"] == "Alerte"),
+        "montant_total_a_risque": round(sum(l["montant_a_risque"] for l in lignes), 2),
+        "lignes": lignes,
+    }
 
 @app.get("/api/ventilation")
 def get_ventilation(exercice: int = 2026, programme_id: Optional[int] = None):
