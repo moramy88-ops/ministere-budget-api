@@ -85,19 +85,19 @@ CIBLES_TRIMESTRE = {"T1": 25, "T2": 50, "T3": 75, "T4": 100}
 SEUIL_ALERTE = 5
 SEUIL_CRITIQUE = 15
 
-# Données de secours par défaut si la connexion BD est absente
+# Données de secours alignées avec le format attendu par le frontend index.html
 HISTORIQUE_EXERCICES = {
     2026: [
-        {"id": 1, "code": "P01", "nom": "Enseignement Supérieur", "t1": 10.0, "t2": 21.0, "t3": 0, "t4": 0, "lignes": [{"id": 101, "label": "Construction et équipement d'écoles", "lfi": 1000000000, "ajustement_lfr": 150000000, "engagements": 300000000, "paiements": 210000000}], "indicateurs": [{"id": 201, "nom": "Taux de scolarisation", "unite": "%", "cible": 95, "realise": 88, "inverse": False}], "ventilation": [{"nature": "Dépenses de personnel", "dotation_lfi": 800000000, "ajustement_lfr": 50000000, "engagements": 300000000, "paiements": 210000000}]},
-        {"id": 2, "code": "P02", "nom": "Santé Publique", "t1": 8.5, "t2": 18.5, "t3": 0, "t4": 0, "lignes": [{"id": 103, "label": "Approvisionnement en médicaments", "lfi": 800000000, "ajustement_lfr": -50000000, "engagements": 250000000, "paiements": 148000000}], "indicateurs": [{"id": 202, "nom": "Taux de couverture vaccinale", "unite": "%", "cible": 90, "realise": 82, "inverse": False}], "ventilation": [{"nature": "Transferts courants", "dotation_lfi": 600000000, "ajustement_lfr": 0, "engagements": 150000000, "paiements": 111000000}]},
-        {"id": 3, "code": "P03", "nom": "Infrastructures Routières", "t1": 12.0, "t2": 30.0, "t3": 0, "t4": 0, "lignes": [{"id": 105, "label": "Entretien du réseau routier", "lfi": 2000000000, "ajustement_lfr": 200000000, "engagements": 800000000, "paiements": 600000000}], "indicateurs": [{"id": 203, "nom": "Routes bitumées ou entretenues", "unite": "Km", "cible": 150, "realise": 45, "inverse": False}], "ventilation": [{"nature": "Investissements exécutés par l'État", "dotation_lfi": 3000000000, "ajustement_lfr": 200000000, "engagements": 1200000000, "paiements": 900000000}]},
-        {"id": 4, "code": "P04", "nom": "Gouvernance & Administration", "t1": 9.0, "t2": 19.7, "t3": 0, "t4": 0, "lignes": [{"id": 107, "label": "Modernisation des services", "lfi": 600000000, "ajustement_lfr": 0, "engagements": 180000000, "paiements": 118200000}], "indicateurs": [{"id": 204, "nom": "Taux de dématérialisation", "unite": "%", "cible": 80, "realise": 65, "inverse": False}], "ventilation": [{"nature": "Dépenses de fonctionnement", "dotation_lfi": 1000000000, "ajustement_lfr": 0, "engagements": 280000000, "paiements": 197000000}]}
+        {"id": 1, "code": "P01", "nom": "Enseignement Supérieur", "t1": 10.0, "t2": 21.0, "t3": 0, "t4": 0, "lignes": [{"id": 101, "label": "Construction et équipement d'écoles", "lfi": 1000000000, "ajustement_lfr": 150000000, "engagements": 300000000, "paiements": 210000000}], "icps": [{"id": 201, "nom": "Taux de scolarisation", "unite": "%", "cible": 95, "realise": 88, "inverse": False}], "ventilation": [{"nature": "Dépenses de personnel", "dotation_lfi": 800000000, "ajustement_lfr": 50000000, "engagements": 300000000, "paiements": 210000000}]},
+        {"id": 2, "code": "P02", "nom": "Santé Publique", "t1": 8.5, "t2": 18.5, "t3": 0, "t4": 0, "lignes": [{"id": 103, "label": "Approvisionnement en médicaments", "lfi": 800000000, "ajustement_lfr": -50000000, "engagements": 250000000, "paiements": 148000000}], "icps": [{"id": 202, "nom": "Taux de couverture vaccinale", "unite": "%", "cible": 90, "realise": 82, "inverse": False}], "ventilation": [{"nature": "Transferts courants", "dotation_lfi": 600000000, "ajustement_lfr": 0, "engagements": 150000000, "paiements": 111000000}]},
+        {"id": 3, "code": "P03", "nom": "Infrastructures Routières", "t1": 12.0, "t2": 30.0, "t3": 0, "t4": 0, "lignes": [{"id": 105, "label": "Entretien du réseau routier", "lfi": 2000000000, "ajustement_lfr": 200000000, "engagements": 800000000, "paiements": 600000000}], "icps": [{"id": 203, "nom": "Routes bitumées ou entretenues", "unite": "Km", "cible": 150, "realise": 45, "inverse": False}], "ventilation": [{"nature": "Investissements exécutés par l'État", "dotation_lfi": 3000000000, "ajustement_lfr": 200000000, "engagements": 1200000000, "paiements": 900000000}]},
+        {"id": 4, "code": "P04", "nom": "Gouvernance & Administration", "t1": 9.0, "t2": 19.7, "t3": 0, "t4": 0, "lignes": [{"id": 107, "label": "Modernisation des services", "lfi": 600000000, "ajustement_lfr": 0, "engagements": 180000000, "paiements": 118200000}], "icps": [{"id": 204, "nom": "Taux de dématérialisation", "unite": "%", "cible": 80, "realise": 65, "inverse": False}], "ventilation": [{"nature": "Dépenses de fonctionnement", "dotation_lfi": 1000000000, "ajustement_lfr": 0, "engagements": 280000000, "paiements": 197000000}]}
     ],
     2027: [
-        {"id": 1, "code": "P01", "nom": "Éducation & Formation Pro", "t1": 0, "t2": 0, "t3": 0, "t4": 0, "lignes": [], "indicateurs": [], "ventilation": []},
-        {"id": 2, "code": "P02", "nom": "Santé & Protection Sociale", "t1": 0, "t2": 0, "t3": 0, "t4": 0, "lignes": [], "indicateurs": [], "ventilation": []},
-        {"id": 3, "code": "P03", "nom": "Transports & Désenclavement", "t1": 0, "t2": 0, "t3": 0, "t4": 0, "lignes": [], "indicateurs": [], "ventilation": []},
-        {"id": 4, "code": "P04", "nom": "Pilotage & Support Ministériel", "t1": 0, "t2": 0, "t3": 0, "t4": 0, "lignes": [], "indicateurs": [], "ventilation": []}
+        {"id": 1, "code": "P01", "nom": "Éducation & Formation Pro", "t1": 0, "t2": 0, "t3": 0, "t4": 0, "lignes": [], "icps": [], "ventilation": []},
+        {"id": 2, "code": "P02", "nom": "Santé & Protection Sociale", "t1": 0, "t2": 0, "t3": 0, "t4": 0, "lignes": [], "icps": [], "ventilation": []},
+        {"id": 3, "code": "P03", "nom": "Transports & Désenclavement", "t1": 0, "t2": 0, "t3": 0, "t4": 0, "lignes": [], "icps": [], "ventilation": []},
+        {"id": 4, "code": "P04", "nom": "Pilotage & Support Ministériel", "t1": 0, "t2": 0, "t3": 0, "t4": 0, "lignes": [], "icps": [], "ventilation": []}
     ]
 }
 
@@ -173,7 +173,7 @@ def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
             p['lignes'] = cur.fetchall()
 
             cur.execute("SELECT id, nom, unite, cible_annuelle AS cible, COALESCE(realise, 0) AS realise, inverse FROM indicateurs WHERE programme_id = %s ORDER BY id;", (p['id'],))
-            p['indicateurs'] = cur.fetchall()
+            p['icps'] = cur.fetchall()  # Alignement du nom de la clé avec le frontend (icps)
 
             cur.execute("SELECT nature_economique AS nature, COALESCE(dotation_lfi, dotation) AS dotation_lfi, COALESCE(ajustement_lfr, 0) AS ajustement_lfr, COALESCE(engagements, 0) AS engagements, COALESCE(paiements, 0) AS paiements FROM ventilation_economique WHERE programme_id = %s;", (p['id'],))
             p['ventilation'] = cur.fetchall()
@@ -403,7 +403,7 @@ def _generer_rapport_docx(exercice: int, trimestre: str) -> io.BytesIO:
         for l in lignes:
             lfi_val = float(l.get("lfi", 0) or 0)
             poids_dans_prog = (lfi_val / tot_prog_lfi * 100) if tot_prog_lfi > 0 else 0.0
-            _format_cellule_donnees(tbl_fnc.cell(curr_row, 0), f"   └ {l.get('label', '')}", align=WD_ALIGN_PARAGRAPH.LEFT)
+            _format_cellule_donnees(tbl_fnc.cell(curr_row, 0), f"    └ {l.get('label', '')}", align=WD_ALIGN_PARAGRAPH.LEFT)
             _format_cellule_donnees(tbl_fnc.cell(curr_row, 1), _fmt_fcfa(lfi_val), align=WD_ALIGN_PARAGRAPH.RIGHT)
             _format_cellule_donnees(tbl_fnc.cell(curr_row, 2), _fmt_pct(poids_dans_prog), align=WD_ALIGN_PARAGRAPH.CENTER)
             curr_row += 1
