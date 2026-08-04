@@ -486,3 +486,30 @@ def get_risques(exercice: int = 2026, trimestre: str = "T2"):
         "montant_total_a_risque": 0,
         "lignes": []
     }
+
+@app.get("/api/db-test")
+def db_test():
+    if not DATABASE_URL:
+        return {"status": "erreur", "detail": "La variable d'environnement DATABASE_URL est introuvable."}
+    
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return {"status": "erreur", "detail": "Impossible d'établir la connexion (connexion renvoie None)."}
+        
+        cur = conn.cursor()
+        cur.execute("SELECT version();")
+        version = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "succès",
+            "message": "Connexion PostgreSQL réussie !",
+            "version_postgres": version
+        }
+    except Exception as e:
+        return {
+            "status": "erreur",
+            "exception": str(e)
+        }
