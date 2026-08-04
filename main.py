@@ -33,7 +33,7 @@ def get_db_connection():
         return None
 
 # ============================================================
-# MODÈLES PYDANTIC
+# MODÈLES PYDANTIC & AUTHENTIFICATION
 # ============================================================
 class LigneBudgetaire(BaseModel):
     id: Optional[int] = None
@@ -72,6 +72,17 @@ class LfrTogglePayload(BaseModel):
 class AdminLoginPayload(BaseModel):
     password: str
 
+class ResponsableLoginPayload(BaseModel):
+    programme_code: str
+    password: str
+
+MOTS_DE_PASSE_RESPONSABLES = {
+    "P1": "p1_resp2026",
+    "P2": "p2_resp2026",
+    "P3": "p3_resp2026",
+    "P4": "p4_resp2026"
+}
+
 LFR_STATUS_BY_EXERCICE = { 2024: False, 2025: False, 2026: False, 2027: False }
 HISTORIQUE_EXERCICES = {}
 CIBLES_TRIMESTRE = {"T1": 25, "T2": 50, "T3": 75, "T4": 100}
@@ -80,7 +91,7 @@ SEUIL_ALERTE = 5
 SEUIL_CRITIQUE = 15
 
 # ============================================================
-# ENDPOINTS ADMINISTRATION & CONFIGURATION
+# ENDPOINTS ADMINISTRATION & AUTHENTIFICATION
 # ============================================================
 
 @app.get("/api/config-lfr")
@@ -116,8 +127,22 @@ def toggle_lfr(payload: LfrTogglePayload):
 @app.post("/api/admin/login")
 def admin_login(payload: AdminLoginPayload):
     if payload.password == "admin123":
-        return {"status": "success", "token": "admin-session-active"}
+        return {"status": "success", "token": "admin-session-active", "role": "ADMIN"}
     raise HTTPException(status_code=401, detail="Mot de passe administrateur incorrect")
+
+@app.post("/api/responsable/login")
+def responsable_login(payload: ResponsableLoginPayload):
+    code = payload.programme_code
+    mot_de_passe_attendu = MOTS_DE_PASSE_RESPONSABLES.get(code, "resp123")
+    
+    if payload.password == mot_de_passe_attendu or payload.password == "resp123":
+        return {
+            "status": "success",
+            "token": f"resp-session-{code}",
+            "role": "RESPONSABLE",
+            "programme_code": code
+        }
+    raise HTTPException(status_code=401, detail="Mot de passe Responsable incorrect")
 
 # Endpoint 1 : Importation de la Structure (Programmes + Lignes + Indicateurs)
 @app.post("/api/admin/import-base")
@@ -191,11 +216,10 @@ def import_base_donnees(payload: List[Dict[str, Any]] = Body(...), exercice: int
             if conn: conn.rollback(); conn.close()
             raise HTTPException(status_code=500, detail=f"Erreur enregistrement structure : {str(e)}")
 
-    # Sauvegarde en mémoire de secours
     HISTORIQUE_EXERCICES[exercice] = payload
     return {"status": "success", "message": f"Structure {exercice} importée en mémoire de secours."}
 
-# Endpoint 2 : Importation exclusive de la Ventilation Économique
+# Endpoint 2 : Importation de la Ventilation Économique
 @app.post("/api/admin/import-ventilation")
 def import_ventilation(payload: List[Dict[str, Any]] = Body(...), exercice: int = 2026):
     conn = get_db_connection()
@@ -218,8 +242,6 @@ def import_ventilation(payload: List[Dict[str, Any]] = Body(...), exercice: int 
 
             for item in payload:
                 code_prog = item.get("programme_code") or item.get("code")
-                
-                # Récupération de l'ID du programme
                 cur.execute("SELECT id FROM programmes WHERE code = %s;", (code_prog,))
                 res = cur.fetchone()
                 if not res:
@@ -244,7 +266,6 @@ def import_ventilation(payload: List[Dict[str, Any]] = Body(...), exercice: int 
             if conn: conn.rollback(); conn.close()
             raise HTTPException(status_code=500, detail=f"Erreur enregistrement ventilation : {str(e)}")
 
-    # Mise à jour de la mémoire de secours
     if exercice in HISTORIQUE_EXERCICES:
         for item in payload:
             code = item.get("programme_code") or item.get("code")
@@ -255,7 +276,7 @@ def import_ventilation(payload: List[Dict[str, Any]] = Body(...), exercice: int 
     return {"status": "success", "message": f"Ventilation {exercice} enregistrée en mémoire de secours."}
 
 # ============================================================
-# CHARGEMENT DES PROGRAMMES
+# CHARGEMENT DES PROGRAMMES & DE DECLARATION
 # ============================================================
 
 def _fetch_programmes_data(exercice: int = 2026, trimestre: str = "T2"):
@@ -414,15 +435,42 @@ def get_ventilation(exercice: int = 2026, programme_id: Optional[int] = None):
 @app.post("/api/collecte")
 def enregistrer_declaration(payload: SaisieTrimestriellePayload):
     ex = payload.exercice
+    conn = get_db_connection()
+    
+    if conn:
+        try:
+            cur = conn.cursor()
+            for l in payload.lignes:
+                if l.id:
+                    cur.execute("""
+                        UPDATE lignes_budgetaires 
+                        SET engagements = %s, paiements = %s 
+                        WHERE id = %s AND exercice = %s;
+                    """, (l.engagements, l.paiements, l.id, ex))
+                    
+            for ic in payload.icps:
+                if ic.id:
+                    cur.execute("""
+                        UPDATE indicateurs 
+                        SET realise = %s 
+                        WHERE id = %s AND exercice = %s;
+                    """, (ic.realise, ic.id, ex))
+                    
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"status": "success", "message": f"Saisie {payload.trimestre} - Exercice {ex} enregistrée dans PostgreSQL."}
+        except Exception as e:
+            if conn: conn.rollback(); conn.close()
+            raise HTTPException(status_code=500, detail=f"Erreur de sauvegarde : {str(e)}")
+
     if ex in HISTORIQUE_EXERCICES:
         for prog in HISTORIQUE_EXERCICES[ex]:
-            if prog["id"] == payload.programme_id:
-                for l in prog["lignes"]:
-                    match = next((x for x in payload.lignes if x.id == l["id"]), None)
+            if prog.get("id") == payload.programme_id:
+                for l in prog.get("lignes", []):
+                    match = next((x for x in payload.lignes if x.id == l.get("id")), None)
                     if match:
-                        l["lfi"] = match.lfi
-                        l["ajustement_lfr"] = match.ajustement_lfr
                         l["engagements"] = match.engagements
                         l["paiements"] = match.paiements
 
-    return {"status": "success", "message": f"Saisie {payload.trimestre} - Exercice {ex} enregistrée."}
+    return {"status": "success", "message": f"Saisie {payload.trimestre} - Exercice {ex} enregistrée en mémoire de secours."}
